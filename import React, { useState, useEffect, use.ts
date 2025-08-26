@@ -1,0 +1,599 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, onSnapshot, getDoc, updateDoc } from 'firebase/firestore';
+import { Mic, ListTodo, Award, Tags, Sparkles, Trophy, CheckCircle, Lightbulb, TrendingUp, X, ChevronRight, Sparkle, LoaderCircle } from 'lucide-react';
+import { Transition } from '@headlessui/react';
+
+// Main component for the entire application
+const App = () => {
+    // State variables for authentication and data
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+
+    // State for user data and UI
+    const [notes, setNotes] = useState([]);
+    const [tasks, setTasks] = useState([]);
+    const [streaks, setStreaks] = useState({ current: 0, longest: 0, lastCheck: null });
+    const [achievements, setAchievements] = useState([]);
+    const [points, setPoints] = useState(0);
+    const [level, setLevel] = useState(1);
+    const [showAchievementModal, setShowAchievementModal] = useState(false);
+    const [newAchievement, setNewAchievement] = useState(null);
+
+    // State for voice dictation
+    const [isListening, setIsListening] = useState(false);
+    const [transcript, setTranscript] = useState('');
+    const [statusMessage, setStatusMessage] = useState('Press the microphone to start dictating...');
+    const [isLoading, setIsLoading] = useState(false);
+
+    // AI model configuration
+    const AI_MODEL_TEXT_GEN = 'gemini-2.5-flash-preview-05-20';
+    const AI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${AI_MODEL_TEXT_GEN}:generateContent?key=`;
+    const apiKey = ""; // Canvas will provide this at runtime
+
+    // List of available achievements
+    const allAchievements = [
+        { id: 'first_note', name: 'First Note', description: 'Dictate your first note.', icon: <Sparkles size={24} /> },
+        { id: 'dictation_master', name: 'Dictation Master', description: 'Dictate a note with over 100 words.', icon: <Trophy size={24} /> },
+        { id: 'task_tamer', name: 'Task Tamer', description: 'Complete your first task.', icon: <CheckCircle size={24} /> },
+        { id: 'five_tasks_done', name: 'Productivity Pro', description: 'Complete 5 tasks in a single day.', icon: <TrendingUp size={24} /> },
+        { id: 'three_day_streak', name: 'Three-Day Streak', description: 'Dictate a note for 3 consecutive days.', icon: <Lightbulb size={24} /> },
+    ];
+
+    // Reference for speech recognition to prevent multiple instances
+    const speechRecognitionRef = useRef(null);
+
+    // Initialize Firebase and set up auth listener on component mount
+    useEffect(() => {
+        try {
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+            const firebaseApp = initializeApp(firebaseConfig, 'voice-app-' + appId);
+            const firestoreDb = getFirestore(firebaseApp);
+            const firebaseAuth = getAuth(firebaseApp);
+            setDb(firestoreDb);
+            setAuth(firebaseAuth);
+
+            // Set up authentication state listener
+            const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+                if (user) {
+                    setUserId(user.uid);
+                    setIsAuthReady(true);
+                } else {
+                    try {
+                        const anonymousUser = await signInAnonymously(firebaseAuth);
+                        setUserId(anonymousUser.user.uid);
+                        setIsAuthReady(true);
+                    } catch (e) {
+                        console.error("Failed to sign in anonymously:", e);
+                        setStatusMessage('Error authenticating. Please try again later.');
+                    }
+                }
+            });
+            return () => unsubscribe();
+        } catch (e) {
+            console.error('Failed to initialize Firebase:', e);
+            setStatusMessage('Error initializing the application. Please try again later.');
+        }
+    }, []);
+
+    // Fetch and listen to real-time data from Firestore
+    useEffect(() => {
+        if (!isAuthReady || !db || !userId) return;
+
+        // Reference to the user's data document
+        const userDocRef = doc(db, 'artifacts', typeof __app_id !== 'undefined' ? __app_id : 'default-app-id', 'users', userId, 'data', 'user_data');
+
+        // Real-time listener for user data
+        const unsubscribe = onSnapshot(userDocRef, (docSnap) => {
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                setNotes(data.notes || []);
+                setTasks(data.tasks || []);
+                setStreaks(data.streaks || { current: 0, longest: 0, lastCheck: null });
+                setAchievements(data.achievements || []);
+                setPoints(data.points || 0);
+                setLevel(data.level || 1);
+            } else {
+                // If user data doesn't exist, create an initial document
+                setDoc(userDocRef, {
+                    notes: [],
+                    tasks: [],
+                    streaks: { current: 0, longest: 0, lastCheck: null },
+                    achievements: [],
+                    points: 0,
+                    level: 1,
+                    lastUpdated: new Date().toISOString(),
+                });
+            }
+        });
+
+        return () => unsubscribe();
+    }, [isAuthReady, db, userId]);
+
+    // Function to update Firestore data
+    const updateUserData = async (newData) => {
+        if (!db || !userId) return;
+        try {
+            const userDocRef = doc(db, 'artifacts', typeof __app_id !== 'undefined' ? __app_id : 'default-app-id', 'users', userId, 'data', 'user_data');
+            await updateDoc(userDocRef, newData);
+            console.log('User data updated successfully.');
+        } catch (e) {
+            console.error('Error updating user data:', e);
+        }
+    };
+
+    // Gamification Logic
+    const grantAchievement = async (achievementId) => {
+        if (achievements.includes(achievementId)) return;
+        const newAchievements = [...achievements, achievementId];
+        await updateUserData({ achievements: newAchievements });
+        const achievement = allAchievements.find(a => a.id === achievementId);
+        setNewAchievement(achievement);
+        setShowAchievementModal(true);
+        console.log(`Achievement unlocked: ${achievement.name}`);
+    };
+
+    const addPoints = async (amount) => {
+        const newPoints = points + amount;
+        const newLevel = Math.floor(newPoints / 100) + 1;
+        await updateUserData({ points: newPoints, level: newLevel });
+        console.log(`Added ${amount} points. Total points: ${newPoints}. Current level: ${newLevel}`);
+    };
+
+    const updateStreak = () => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0); // Normalize to the start of the day
+
+        let newCurrentStreak = streaks.current;
+        let newLongestStreak = streaks.longest;
+        let lastCheckDate = streaks.lastCheck ? new Date(streaks.lastCheck) : null;
+
+        // Check if there was a previous check and it was yesterday
+        if (lastCheckDate) {
+            const yesterday = new Date(today);
+            yesterday.setDate(yesterday.getDate() - 1);
+            if (lastCheckDate.getTime() === yesterday.getTime()) {
+                newCurrentStreak++;
+            } else if (lastCheckDate.getTime() !== today.getTime()) {
+                newCurrentStreak = 1;
+            }
+        } else {
+            // First time dictating
+            newCurrentStreak = 1;
+        }
+
+        if (newCurrentStreak > newLongestStreak) {
+            newLongestStreak = newCurrentStreak;
+        }
+
+        updateUserData({
+            streaks: {
+                current: newCurrentStreak,
+                longest: newLongestStreak,
+                lastCheck: today.toISOString(),
+            }
+        });
+
+        if (newCurrentStreak === 3) {
+            grantAchievement('three_day_streak');
+        }
+    };
+
+    // AI API Call Functions with Exponential Backoff
+    const callAI = async (prompt, schema = null, retries = 3) => {
+        let delay = 1000;
+        for (let i = 0; i < retries; i++) {
+            try {
+                const chatHistory = [{ role: 'user', parts: [{ text: prompt }] }];
+                const payload = {
+                    contents: chatHistory,
+                    generationConfig: schema ? {
+                        responseMimeType: "application/json",
+                        responseSchema: schema
+                    } : {},
+                };
+                const response = await fetch(AI_API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+    
+                if (!response.ok) {
+                    if (response.status === 429 && i < retries - 1) {
+                        console.log(`Retrying API call in ${delay}ms...`);
+                        await new Promise(res => setTimeout(res, delay));
+                        delay *= 2;
+                        continue;
+                    }
+                    const errorData = await response.json();
+                    console.error('API Error:', errorData);
+                    throw new Error(`API error: ${response.status} ${response.statusText}`);
+                }
+    
+                const result = await response.json();
+                if (result.candidates && result.candidates.length > 0 &&
+                    result.candidates[0].content && result.candidates[0].content.parts &&
+                    result.candidates[0].content.parts.length > 0) {
+                    const text = result.candidates[0].content.parts[0].text;
+                    if (schema) {
+                        return JSON.parse(text);
+                    }
+                    return text;
+                } else {
+                    console.warn('API response structure is unexpected or empty.');
+                    return null;
+                }
+            } catch (error) {
+                console.error('Error in AI API call:', error);
+                setStatusMessage('Error processing with AI. Please try again.');
+                return null;
+            }
+        }
+        return null; // Return null if all retries fail
+    };
+
+    // AI function to extract tasks from a note
+    const extractTasksFromNote = async (text) => {
+        setIsLoading(true);
+        setStatusMessage('Analyzing and extracting tasks...');
+        const prompt = `Extract all actionable items (tasks) from the following text. For each task, identify a concise description, a due date (if mentioned), and the person responsible (if mentioned). If a due date or person is not specified, set the value to null. The due date should be in a 'YYYY-MM-DD' format if possible.
+
+        Example text: "The team meeting on Monday went well. John will follow up with the client by the end of the week, and I need to finalize the presentation deck. Make sure to schedule the next meeting for next Tuesday."
+
+        Example JSON output:
+        [
+          {"description": "Follow up with the client", "responsible": "John", "dueDate": null},
+          {"description": "Finalize the presentation deck", "responsible": "me", "dueDate": null},
+          {"description": "Schedule the next meeting", "responsible": "me", "dueDate": "2025-08-26"}
+        ]
+
+        Now, process the following text: "${text}"`;
+
+        const schema = {
+            type: "ARRAY",
+            items: {
+                type: "OBJECT",
+                properties: {
+                    "description": { "type": "STRING" },
+                    "responsible": { "type": "STRING" },
+                    "dueDate": { "type": "STRING", "nullable": true }
+                },
+                "propertyOrdering": ["description", "responsible", "dueDate"]
+            }
+        };
+
+        const result = await callAI(prompt, schema);
+        setIsLoading(false);
+        return result || [];
+    };
+
+    // AI function to generate tags for a note
+    const generateTagsForNote = async (text) => {
+        setIsLoading(true);
+        setStatusMessage('Generating tags for the note...');
+        const prompt = `Generate a concise, comma-separated list of 3-5 keywords or tags for the following text. Use lowercase and do not include any other text or punctuation.
+
+        Text: "${text}"`;
+        const result = await callAI(prompt);
+        setIsLoading(false);
+        return result ? result.split(',').map(tag => tag.trim()) : [];
+    };
+    
+    // AI function to generate a summary for a note
+    const generateSummaryForNote = async (text) => {
+        if (text.split(' ').length < 50) return '';
+        setIsLoading(true);
+        setStatusMessage('Creating a summary...');
+        const prompt = `Summarize the following text in one or two sentences.
+        Text: "${text}"`;
+        const result = await callAI(prompt);
+        setIsLoading(false);
+        return result || '';
+    };
+
+    // Speech Recognition setup
+    useEffect(() => {
+        const recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (recognition) {
+            speechRecognitionRef.current = new recognition();
+            speechRecognitionRef.current.continuous = true;
+            speechRecognitionRef.current.interimResults = false;
+            speechRecognitionRef.current.lang = 'en-US';
+
+            speechRecognitionRef.current.onstart = () => {
+                setIsListening(true);
+                setStatusMessage('Listening...');
+            };
+
+            speechRecognitionRef.current.onresult = (event) => {
+                let finalTranscript = '';
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    if (event.results[i].isFinal) {
+                        finalTranscript += event.results[i][0].transcript;
+                    }
+                }
+                if (finalTranscript.trim() !== '') {
+                    processDictatedText(finalTranscript);
+                }
+            };
+
+            speechRecognitionRef.current.onerror = (event) => {
+                console.error('Speech recognition error:', event.error);
+                setIsListening(false);
+                setStatusMessage(`Error: ${event.error}. Click the mic to try again.`);
+            };
+
+            speechRecognitionRef.current.onend = () => {
+                setIsListening(false);
+                setStatusMessage('Dictation stopped.');
+            };
+        } else {
+            setStatusMessage('Speech recognition is not supported by your browser.');
+        }
+
+        // Clean up the recognition instance on unmount
+        return () => {
+            if (speechRecognitionRef.current) {
+                speechRecognitionRef.current.stop();
+            }
+        };
+    }, []);
+
+    const toggleListening = () => {
+        if (!speechRecognitionRef.current) {
+            setStatusMessage('Speech recognition is not supported by your browser.');
+            return;
+        }
+
+        if (isListening) {
+            speechRecognitionRef.current.stop();
+        } else {
+            setTranscript('');
+            speechRecognitionRef.current.start();
+        }
+    };
+
+    // Process the final dictated text
+    const processDictatedText = async (text) => {
+        if (text.trim() === '') return;
+
+        setStatusMessage('Processing your note...');
+        
+        // 1. Voice-based formatting (simple commands)
+        let processedText = text.replace(/new line/gi, '\n');
+        processedText = processedText.replace(/new paragraph/gi, '\n\n');
+        
+        // 2. Create the new note object
+        const newNote = {
+            id: Date.now().toString(),
+            content: processedText.trim(),
+            tags: [], // Will be filled by AI
+            summary: '', // Will be filled by AI
+            createdAt: new Date().toISOString(),
+        };
+
+        // 3. AI-Powered Processing (all at once)
+        const [extractedTasks, generatedTags, generatedSummary] = await Promise.all([
+            extractTasksFromNote(processedText),
+            generateTagsForNote(processedText),
+            generateSummaryForNote(processedText)
+        ]);
+        
+        newNote.tags = generatedTags;
+        newNote.summary = generatedSummary;
+
+        // 4. Update the state and Firestore
+        const newTasks = [...tasks, ...extractedTasks.map(t => ({...t, id: Date.now().toString() + Math.random().toString(), isCompleted: false, createdAt: new Date().toISOString()}))];
+        const newNotes = [...notes, newNote];
+
+        const newData = {
+            notes: newNotes,
+            tasks: newTasks,
+        };
+        await updateUserData(newData);
+
+        // 5. Gamification
+        addPoints(5); // 5 points per note
+        if (notes.length === 0) {
+            grantAchievement('first_note');
+        }
+        if (newNote.content.split(' ').length > 100 && !achievements.includes('dictation_master')) {
+            grantAchievement('dictation_master');
+        }
+        updateStreak();
+        
+        setStatusMessage('Note and tasks saved!');
+    };
+
+    const completeTask = async (taskId) => {
+        const updatedTasks = tasks.map(task =>
+            task.id === taskId ? { ...task, isCompleted: true } : task
+        );
+        await updateUserData({ tasks: updatedTasks });
+        addPoints(10); // 10 points per completed task
+        if (!achievements.includes('task_tamer')) {
+            grantAchievement('task_tamer');
+        }
+        const completedTasksToday = updatedTasks.filter(t => t.isCompleted && new Date(t.createdAt).toDateString() === new Date().toDateString());
+        if (completedTasksToday.length >= 5 && !achievements.includes('five_tasks_done')) {
+            grantAchievement('five_tasks_done');
+        }
+    };
+
+    const isTaskCompletedToday = (task) => {
+      const taskDate = new Date(task.createdAt);
+      const today = new Date();
+      return task.isCompleted && taskDate.toDateString() === today.toDateString();
+    };
+
+    const progressForNextLevel = (points % 100);
+
+    const formatDueDate = (dateString) => {
+        if (!dateString) return 'No due date';
+        const date = new Date(dateString);
+        return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+    };
+
+    // Render the main UI
+    return (
+        <div className="min-h-screen bg-gray-900 text-gray-100 font-sans p-4 sm:p-8 flex flex-col items-center">
+            {/* Achievement Modal */}
+            <Transition
+                show={showAchievementModal}
+                enter="transition-opacity duration-300"
+                enterFrom="opacity-0"
+                enterTo="opacity-100"
+                leave="transition-opacity duration-300"
+                leaveFrom="opacity-100"
+                leaveTo="opacity-0"
+            >
+                <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50">
+                    <div className="bg-gray-800 p-6 rounded-lg shadow-lg max-w-sm w-full text-center">
+                        <div className="flex justify-end">
+                            <button onClick={() => setShowAchievementModal(false)} className="text-gray-400 hover:text-white">
+                                <X size={24} />
+                            </button>
+                        </div>
+                        <div className="flex flex-col items-center justify-center space-y-4">
+                            <div className="p-4 bg-gray-700 rounded-full">
+                                {newAchievement?.icon || <Trophy size={48} />}
+                            </div>
+                            <h3 className="text-2xl font-bold text-yellow-400">Achievement Unlocked!</h3>
+                            <p className="text-xl font-semibold">{newAchievement?.name}</p>
+                            <p className="text-sm text-gray-400">{newAchievement?.description}</p>
+                        </div>
+                    </div>
+                </div>
+            </Transition>
+
+            <div className="w-full max-w-4xl space-y-8">
+                <header className="text-center space-y-2">
+                    <h1 className="text-3xl sm:text-4xl font-extrabold text-white">Voiceflow</h1>
+                    <p className="text-gray-400">Dictate, Organize, and Conquer</p>
+                </header>
+                
+                {/* Main Dictation Area */}
+                <div className="bg-gray-800 p-6 rounded-xl shadow-lg flex flex-col items-center space-y-4">
+                    <p className="text-gray-400 italic text-sm text-center min-h-[20px]">{statusMessage}</p>
+                    <button
+                        onClick={toggleListening}
+                        className={`w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 ${isListening ? 'bg-red-500 hover:bg-red-600 animate-pulse' : 'bg-blue-600 hover:bg-blue-700'}`}
+                    >
+                        <Mic size={36} className="text-white" />
+                    </button>
+                    {isLoading && (
+                        <div className="flex items-center space-x-2 text-gray-400">
+                            <LoaderCircle className="animate-spin" size={20} />
+                            <span>Processing...</span>
+                        </div>
+                    )}
+                </div>
+
+                {/* Gamification Dashboard */}
+                <div className="bg-gray-800 p-6 rounded-xl shadow-lg">
+                    <h2 className="text-2xl font-bold text-white mb-4 flex items-center"><Award className="mr-2" /> Your Progress</h2>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 text-center">
+                        <div className="p-4 bg-gray-700 rounded-lg">
+                            <p className="text-sm text-gray-400">Level</p>
+                            <p className="text-3xl font-bold text-green-400">{level}</p>
+                            <div className="h-2 bg-gray-600 rounded-full mt-2">
+                                <div className="h-full bg-green-500 rounded-full transition-all duration-500" style={{ width: `${progressForNextLevel}%` }}></div>
+                            </div>
+                            <p className="text-xs text-gray-500 mt-1">{progressForNextLevel}/100 XP</p>
+                        </div>
+                        <div className="p-4 bg-gray-700 rounded-lg">
+                            <p className="text-sm text-gray-400">Current Streak</p>
+                            <p className="text-3xl font-bold text-yellow-400">{streaks.current}</p>
+                            <p className="text-xs text-gray-500 mt-1">days</p>
+                        </div>
+                        <div className="p-4 bg-gray-700 rounded-lg">
+                            <p className="text-sm text-gray-400">Total Points</p>
+                            <p className="text-3xl font-bold text-purple-400">{points}</p>
+                            <p className="text-xs text-gray-500 mt-1">earned</p>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Achievements Section */}
+                <div className="bg-gray-800 p-6 rounded-xl shadow-lg">
+                    <h2 className="text-2xl font-bold text-white mb-4 flex items-center"><Trophy className="mr-2" /> Achievements</h2>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                        {allAchievements.map(ach => (
+                            <div key={ach.id} className={`p-4 rounded-lg text-center transition-all duration-300 ${achievements.includes(ach.id) ? 'bg-yellow-900 bg-opacity-50 text-yellow-300' : 'bg-gray-700 text-gray-400 opacity-50'}`}>
+                                <div className="flex justify-center mb-2">
+                                    {ach.icon}
+                                </div>
+                                <p className="text-sm font-semibold">{ach.name}</p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                {/* Tasks Section */}
+                <div className="bg-gray-800 p-6 rounded-xl shadow-lg">
+                    <h2 className="text-2xl font-bold text-white mb-4 flex items-center"><ListTodo className="mr-2" /> Your Tasks</h2>
+                    {tasks.length > 0 ? (
+                        <ul className="space-y-4">
+                            {tasks.map(task => (
+                                <li key={task.id} className={`flex items-start p-4 rounded-lg ${isTaskCompletedToday(task) ? 'bg-green-900 bg-opacity-50 line-through' : 'bg-gray-700'}`}>
+                                    <button onClick={() => completeTask(task.id)} className="flex-shrink-0 mr-3 mt-1">
+                                        <CheckCircle size={20} className={isTaskCompletedToday(task) ? 'text-green-400' : 'text-gray-400 hover:text-green-400'} />
+                                    </button>
+                                    <div className="flex-1">
+                                        <p className={`text-gray-200 ${isTaskCompletedToday(task) ? 'text-gray-400' : ''}`}>{task.description}</p>
+                                        <div className="flex items-center text-sm text-gray-400 mt-1">
+                                            {task.responsible && <span className="flex items-center mr-3"><Sparkle size={12} className="mr-1" />{task.responsible}</span>}
+                                            {task.dueDate && <span className="flex items-center"><ChevronRight size={12} className="mr-1" />{formatDueDate(task.dueDate)}</span>}
+                                        </div>
+                                    </div>
+                                </li>
+                            ))}
+                        </ul>
+                    ) : (
+                        <p className="text-center text-gray-400">No tasks found. Dictate a new note to create some!</p>
+                    )}
+                </div>
+
+                {/* Notes Section */}
+                <div className="bg-gray-800 p-6 rounded-xl shadow-lg">
+                    <h2 className="text-2xl font-bold text-white mb-4 flex items-center"><Lightbulb className="mr-2" /> Your Notes</h2>
+                    {notes.length > 0 ? (
+                        <ul className="space-y-4">
+                            {notes.map(note => (
+                                <li key={note.id} className="bg-gray-700 p-4 rounded-lg">
+                                    <p className="text-gray-200 whitespace-pre-line">{note.content}</p>
+                                    {note.summary && (
+                                        <p className="mt-2 text-sm text-gray-400 italic border-t border-gray-600 pt-2">Summary: {note.summary}</p>
+                                    )}
+                                    {note.tags.length > 0 && (
+                                        <div className="flex flex-wrap mt-2">
+                                            {note.tags.map((tag, index) => (
+                                                <span key={index} className="bg-blue-600 text-white text-xs font-semibold px-2 py-1 rounded-full mr-2 mb-2">
+                                                    {tag}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
+                                    <p className="text-xs text-gray-500 mt-2">
+                                        {new Date(note.createdAt).toLocaleDateString()}
+                                    </p>
+                                </li>
+                            ))}
+                        </ul>
+                    ) : (
+                        <p className="text-center text-gray-400">No notes yet. Press the mic to start!</p>
+                    )}
+                </div>
+            </div>
+            <div className="absolute top-4 right-4 text-xs text-gray-500">
+                User ID: {userId || 'Authenticating...'}
+            </div>
+        </div>
+    );
+};
+
+export default App;
